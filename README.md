@@ -1,32 +1,47 @@
-# Virtual Power Plant (VPP): Stochastic Dispatch Optimizer
+# Virtual Power Plant: Battery Dispatch Optimiser
 
-## Executive Summary
-In the highly volatile European power markets, the ability to instantly translate meteorological data into profitable trading action is a distinct competitive advantage. This repository serves as a commercially viable, end-to-end quantitative pipeline. **By deploying this architecture, a trading desk can generate instantaneous, mathematically optimal battery dispatch schedules that maximize daily P&L while strictly adhering to physical asset constraints.**
+A small end-to-end prototype of the decision chain behind a battery in a virtual power plant: pull weather data, forecast renewable output, then schedule when the battery should charge and discharge against hourly electricity prices.
 
-This project bridges data engineering, machine learning, and advanced operations research, proving that theoretical mathematics can be deployed to capture real-world arbitrage spreads.
+The three stages are separate scripts. Each runs on its own, and the forecasting and optimisation stages currently use synthetic inputs so the results are reproducible.
 
-## Core Architecture & Commercial Value
+![Optimised dispatch schedule](./dispatch_schedule.png)
 
-### 1. Asynchronous Data Engineering
-* **The Engine:** Engineered a high-throughput, event-driven data ingestion pipeline using `asyncio` and `aiohttp`. 
-* **The Source:** The pipeline concurrently streams live, institutional-grade meteorological data (100m wind speed and Direct Normal Irradiance) directly from the **Open-Meteo API**.
-* **The Value:** Eliminates CPU blocking, allowing the system to scale and ingest thousands of grid nodes simultaneously—a critical requirement for high-frequency algorithmic trading environments.
+## What each stage does
 
-### 2. Predictive Forecasting (Champion vs. Challenger)
-* **The Engine:** Built a rigorous Time-Series Cross-Validation engine to predict renewable energy yield availability, pitting a classical statistical baseline (Ridge Regression) against a Machine Learning ensemble (Random Forest).
-* **The Value:** Refuses to apply "black-box" AI blindly. The pipeline mathematically proved that the **Random Forest Regressor** captures non-linear weather relationships better, crowning it the champion with a highly accurate 0.919 R² score.
+### 1. Weather ingestion (`ingestion/async_pipeline.py`)
+Fetches hourly 100 m wind speed and direct normal irradiance for the past 7 days from the free [Open-Meteo](https://open-meteo.com/) API, using `asyncio` and `aiohttp`, and returns a pandas DataFrame. It queries one location (London); the async structure is there so more locations can be fetched concurrently.
 
-### 3. MILP Stack Optimization (PuLP)
-* **The Engine:** Formulated a Mixed-Integer Linear Programming (MILP) solver to mathematically dictate the exact megawatt volume to charge or discharge at any given hour.
-* **Commercial Realism & Constraints:** 
-    * **Thermodynamic Efficiency:** Imposed a 90% round-trip efficiency penalty to simulate heat loss, preventing the solver from suggesting physically impossible simultaneous charge/discharge cycles.
-    * **Cycle Aging (Degradation):** Injected a €5/MWh marginal penalty into the objective function. The model actively protects the physical asset, refusing to trade during low-volatility hours where the spread fails to cover the wear-and-tear of the lithium-ion cells.
-    * **Bang-Bang Control:** Because the linear objective function contains no variable marginal costs, the algorithm intelligently slams the system to its absolute boundary constraints (25 MW max flow rate) to extract the maximum possible arbitrage spread.
+### 2. Generation forecasting (`forecasting/ml_forecaster.py`)
+Compares a Ridge regression baseline with a Random Forest for predicting solar irradiance (a proxy for solar yield) from hour of day, day of year and wind speed, using 3-fold time-series cross-validation.
 
-## Optimization Visual
-![Optimized VPP Dispatch Schedule](./dispatch_schedule.png)
+On the bundled synthetic week of data, the Random Forest reaches an average R² of about 0.92, while Ridge scores below zero. That gap is expected: irradiance is zero at night and high during the day, a non-linear shape a linear model on raw hour cannot capture. The score shows the method works, not real-world accuracy.
 
-## Execution Guide
-1. Run `python ingestion/async_pipeline.py` to test the concurrent Open-Meteo API network stream.
-2. Run `python forecasting/ml_forecaster.py` to evaluate the Champion vs. Challenger model backtest.
-3. Run `python optimization/milp_optimizer.py` to generate the optimal hourly dispatch schedule.
+### 3. Dispatch optimisation (`optimization/milp_optimizer.py`)
+A linear programme in PuLP (CBC solver) that chooses hourly charge and discharge volumes for a 100 MWh / 25 MW battery to maximise trading margin over 24 hours of day-ahead prices.
+
+- **Efficiency:** 90% of charged energy reaches storage, so cycling has a real cost.
+- **Degradation:** a €5/MWh penalty on every MWh charged or discharged, so the battery stays idle when the price spread does not cover wear.
+- **State of charge:** tracked hour by hour, bounded between empty and full capacity. The battery starts empty.
+
+Because the objective is linear with fixed rate limits, the optimal schedule tends to run at full power or not at all. The sample price curve includes a negative-price night trough and an evening peak, which the solver charges into and sells into respectively.
+
+## Run it
+
+Requires Python 3.9 or later.
+
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+python ingestion/async_pipeline.py        # live weather pull
+python forecasting/ml_forecaster.py       # model comparison
+python optimization/milp_optimizer.py     # dispatch schedule and chart
+```
+
+## Limitations and next steps
+
+- Connect the stages: feed the ingested weather into the forecaster, and the forecast into the optimiser.
+- Replace synthetic prices with real day-ahead prices (for example ENTSO-E) and forecast prices, not just generation.
+- Add an end-of-day state-of-charge target, and a binary variable to forbid simultaneous charge and discharge (making it a true MILP).
+- Handle forecast uncertainty, for example with scenario-based (stochastic) optimisation.
